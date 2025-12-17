@@ -1,0 +1,34 @@
+project:
+  type: book
+  output-dir: docs
+
+execute:
+  echo: true
+  warning: false
+  message: false
+
+book:
+  title: "Quantifying the Impact of CO₂ Emissions and Renewable Energy Adoption on Global Temperature Change (1990–2023)"
+  author:
+    - "Afreen Sorathiya (as7852)"
+    - "Anamika Mishra (akm2259)"
+  repo-url: https://github.com/anamikam-772/Global-Temperature-Change-1990-2023.git
+  date: today
+  page-footer:
+    right: |
+      This book was built with <a href="https://quarto.org/">Quarto</a>.
+  repo-actions: [edit, issue]
+  chapters:
+    - index.qmd
+    - data.qmd
+    - results.qmd
+    - conclusion.qmd
+
+format:
+  html:
+    fig-width: 6
+    fig-height: 4
+    out-width: 60%
+    embed-resources: true
+
+

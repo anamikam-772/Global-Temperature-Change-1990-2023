@@ -1,0 +1,1235 @@
+## 3. Exploratory Analysis
+
+#### 3.1 Correlation Matrix
+
+```{r}
+library(tidyverse)
+library(janitor)
+library(here)
+library(ggplot2)
+library(dplyr)
+library(GGally)
+library(sf)
+library(rnaturalearth)
+library(rnaturalearthdata)
+library(cartogram)
+library(plotly)
+library(tidyr)
+library(scales)
+library(patchwork)
+library(randomForest)
+library(lime)
+library(Metrics)
+library(iml)       # SHAP
+library(mlr3)
+library(mlr3learners)
+library(ggrepel)
+library(grid)   # for unit()
+```
+
+
+```{r}
+combined <- readRDS("data/combined.rds")
+corr_data <- combined[, c("temp_anomaly", "co2", "gdp_per_capita",
+                          "renewable_energy_share", "methane")]
+corr_data <- na.omit(corr_data)
+corr_matrix <- cor(corr_data)
+corr_matrix
+library(corrplot)
+
+corrplot(corr_matrix,
+         method="color",
+         type="upper",
+         addCoef.col="black",
+         tl.col="black",
+         tl.srt=45,
+         col=colorRampPalette(c("blue","white","red"))(200))
+
+
+
+```
+
+The correlation matrix provides an initial statistical overview of how key variables—temperature anomaly, CO₂ emissions, GDP per capita, renewable-energy share, and methane—relate to one another. The plot shows very low correlations between temperature anomaly and individual country-level indicators, including CO₂ emissions. This does not mean CO₂ does not drive warming; rather, it reflects that temperature anomalies in the dataset represent global yearly values, while the emissions data represent country-level values, creating a mismatch in granularity.
+As expected, CO₂ and methane show a very strong positive correlation (≈0.88), consistent with the fact that both gases are released through overlapping industrial and agricultural activities. GDP per capita is weakly correlated with CO₂, suggesting that while richer countries tend to emit more, the relationship is not perfectly linear because some wealthy countries have transitioned to cleaner energy systems. Renewable-energy share displays small negative correlations with GDP and CO₂, implying that countries with stronger renewable penetration tend to have slightly lower emissions intensity. These early correlations help highlight structural relationships and hint at which indicators may contribute more to multivariate patterns later in the analysis.
+
+
+#### 3.2 CO₂ Emissions vs Temperature Anomaly
+
+```{r}
+
+# Filter out NA, Inf, and negative/invalid values
+
+plot_data <- combined[
+  is.finite(combined$co2) &
+  is.finite(combined$temp_anomaly) &
+  combined$co2 >= 0,
+]
+
+# plot
+ggplot(plot_data, aes(x = co2, y = temp_anomaly)) +
+  geom_point(alpha = 0.6) +
+  geom_smooth(method = "lm", se = TRUE, color = "blue") +
+  labs(
+    title = expression(CO[2] * " Emissions vs Temperature Anomaly"),
+    x = "CO2 emissions",
+    y = "Temperature anomaly (°C)"
+  ) +
+  theme_minimal(base_size = 14)
+
+```
+The scatter plot demonstrates a weak but positive relationship between national CO₂ emissions and global temperature anomalies. Since the temperature anomaly is a global measure applied to all countries for the same year, the pattern largely reflects temporal coincidence: countries emit more CO₂ in years when global temperatures are already trending upward.
+The fitted regression line shows a slight upward slope, reinforcing the general association that higher global emissions accompany higher global temperatures. Dense clustering near low emissions indicates that many countries contribute minimally to global emissions yet still experience rising global temperatures—a pattern consistent with climate inequality. Meanwhile, the upper-right region of the plot reveals a small group of very high-emitting countries whose individual contributions significantly influence global CO₂ trends.
+
+#### 3.3 GDP per Capita vs Renewable-Energy Share
+```{r}
+
+# Clean data: remove NA/Inf, ensure valid values
+plot_data2 <- combined[
+  is.finite(combined$gdp_per_capita) &
+  is.finite(combined$renewable_energy_share) &
+  combined$gdp_per_capita >= 0 &
+  combined$renewable_energy_share >= 0,
+]
+
+# Plot
+ggplot(plot_data2, aes(x = gdp_per_capita, y = renewable_energy_share)) +
+  geom_point(alpha = 0.6, color = "tomato") +
+  geom_smooth(method = "lm", se = TRUE, color = "blue") +
+  labs(
+    title = "GDP per Capita vs Renewable Energy Share",
+    x = "GDP per capita (USD)",
+    y = "Renewable energy share (%)"
+  ) +
+  theme_minimal(base_size = 14)
+
+```
+This plot reveals a distinct downward trend, indicating that countries with higher GDP per capita tend to have a lower share of renewable energy consumption. While this may seem counterintuitive—wealthier countries are often viewed as clean-energy leaders—the observed relationship reflects broader global dynamics. Many high-income nations still rely heavily on fossil fuels due to their established industrial systems, energy-intensive lifestyles, and legacy infrastructures.
+Conversely, some lower-income countries exhibit high renewable-energy shares because their power systems rely on traditional biomass or hydroelectricity rather than complex fossil-fuel networks. The negative slope emphasizes that economic development alone does not guarantee clean energy adoption; rather, structural transitions and policy interventions are required to shift energy portfolios toward low-carbon sources.
+
+
+#### 3.4 Population vs CO₂ Emissions
+```{r}
+
+# Clean data using correct population column (base R)
+plot_data3 <- combined[
+  is.finite(combined$population.x) &
+  is.finite(combined$co2) &
+  combined$population.x > 0 &
+  combined$co2 >= 0,
+]
+
+# Plot
+ggplot(plot_data3, aes(x = population.x, y = co2)) +
+  geom_point(alpha = 0.6, color = "darkorange") +
+  geom_smooth(method = "lm", se = TRUE, color = "blue") +
+  labs(
+    title = expression("Population vs " * CO[2] * " Emissions"),
+    x = "Population",
+    y = "CO\u2082 emissions (million tonnes)"
+  ) +
+  theme_minimal(base_size = 14)
+
+```
+The plot between population and CO₂ emissions displays a strong positive relationship, driven by the fact that countries with larger populations tend to consume more energy and thereby generate more emissions. Large emitters such as China and India appear in the upper-right region of the graph, reflecting both their high populations and rapid industrialization.
+However, the relationship is not perfectly proportional. Some countries with moderate populations exhibit disproportionately high emissions due to carbon-intensive industries (e.g., the United States), while some populous countries contribute far less per capita. The regression line reinforces the broad trend of population-driven emissions growth but also highlights the variability in emissions intensity across nations.
+
+#### 3.5 Acceleration of Global Warming (1990–2023)
+
+```{r}
+combined$accel <- combined$temp_anomaly -
+  2 * dplyr::lag(combined$temp_anomaly, 1) +
+  dplyr::lag(combined$temp_anomaly, 2)
+
+ggplot(combined, aes(year, accel)) +
+  geom_col(fill = "firebrick") +
+  labs(
+    title = "Acceleration of Global Warming (1990–2023)",
+    y = "Temperature Acceleration (2nd Difference)",
+    x = "Year"
+  ) +
+  theme_minimal(base_size = 14)
+
+```
+The bar plot depicting the second-difference of annual temperature anomalies shows the year-to-year acceleration of global warming. The pattern highlights considerable volatility, with both positive and negative swings, yet several important observations emerge. Periods of strong positive acceleration—particularly in the early 2000s and late 2010s—indicate moments when global warming sped up rapidly. Negative bars do not imply cooling; they simply indicate temporary slowdowns in the rate of increase.
+Notably, the recent years toward 2020–2023 show some of the highest acceleration spikes, mirroring scientific reports that the past decade has experienced unprecedented warming rates. This visualization underscores that global warming is not only continuing but also becoming more rapid and irregular.
+
+
+#### 3.6 Time-Series Decomposition (STL)
+
+```{r}
+gistem_annual <- readRDS("data/gistem_annual.rds")
+ts_temp <- ts(gistem_annual$temp_anomaly, start = 1990, frequency = 12)
+stl_temp <- stl(ts_temp, s.window = "periodic")
+
+plot(stl_temp)
+title("Time-Series Decomposition (STL)")
+
+```
+The STL decomposition breaks the temperature-anomaly time series into three components: trend, seasonality, and remainder. The trend component shows a smooth and steady upward trajectory, confirming long-term global warming independent of short-term fluctuations. The seasonal component captures recurring intra-annual variations, which are relatively small given that the anomalies represent averaged annual values. The remainder component reflects irregular deviations, which correspond to volcanic events, El Niño cycles, or measurement variability.
+Together, the decomposition provides strong evidence that the warming pattern is structurally embedded over time, with a persistent upward trend dominating the series.
+
+#### 3.7 Parallel Coordinate Plot – Top CO₂ Emitters
+
+```{r}
+
+# Country-level averages over the whole study period
+
+pc_data <- combined
+
+pc_data <- dplyr::group_by(pc_data, country)
+
+pc_data <- dplyr::summarise(
+  pc_data,
+  co2                    = mean(co2, na.rm = TRUE),
+  gdp_per_capita         = mean(gdp_per_capita, na.rm = TRUE),
+  renewable_energy_share = mean(renewable_energy_share, na.rm = TRUE),
+  temp_anomaly           = mean(temp_anomaly, na.rm = TRUE),
+  .groups = "drop"
+)
+
+pc_data <- tidyr::drop_na(pc_data)
+
+pc_data <- pc_data[order(pc_data$co2, decreasing = TRUE), ]  # highest emitters first
+
+# Take top 15 emitters (or fewer if you don't have that many)
+top_emitters <- pc_data[1:min(15, nrow(pc_data)), ]
+top_emitters <- as.data.frame(top_emitters)
+top_emitters$country <- as.factor(top_emitters$country)
+
+nrow(top_emitters)   # just to check
+
+
+if (nrow(top_emitters) >= 2) {
+  ggparcoord(
+    data        = top_emitters,
+    columns     = 2:5,      # co2, gdp_per_capita, renewables, temp
+    groupColumn = 1,        # color by country
+    scale       = "robust",
+    alphaLines  = 0.7
+  ) +
+    theme_minimal() +
+    labs(
+      title = expression("Parallel Coordinate Plot – Top " * CO[2] * " Emitters (Country Averages)"),
+      x     = "Variables",
+      y     = "Scaled Values",
+      color = "Country"
+    )
+} else {
+  message("Not enough rows in top_emitters to draw a parallel coordinate plot.")
+}
+
+
+```
+The parallel coordinate plot compares the top CO₂-emitting countries across four metrics: CO₂ emissions, GDP per capita, renewable-energy share, and average temperature anomaly. The plot highlights stark contrasts between countries. Nations like China and the United States dominate the CO₂ axis, reflecting their overwhelming contribution to global emissions. Meanwhile, several high emitters—such as Russia or Saudi Arabia—show low renewable-energy shares, indicating carbon-intensive energy systems.
+Interestingly, temperature anomalies remain relatively clustered across countries because global anomalies apply uniformly. The plot visually reinforces how diverse economic structures, energy practices, and national policies contribute to emissions differences among the highest-emitting nations.
+
+#### 3.8 Interactive Parallel Coordinate Plot (Plotly)
+
+```{r}
+
+
+if (nrow(top_emitters) >= 2) {
+  plot_ly(
+    type = "parcoords",
+    line = list(
+      color     = top_emitters$co2,
+      colorscale = "Viridis"
+    ),
+    dimensions = list(
+      list(label = "CO₂",                  values = top_emitters$co2),
+      list(label = "GDP per capita",       values = top_emitters$gdp_per_capita),
+      list(label = "Renewables share",     values = top_emitters$renewable_energy_share),
+      list(label = "Temp anomaly",         values = top_emitters$temp_anomaly)
+    )
+  )
+}
+
+
+```
+
+The interactive version of the parallel coordinate plot allows dynamic exploration of the same relationships. Users can hover over lines to identify specific countries and compare their metric values more precisely. This version is especially useful for distinguishing between countries that appear visually similar in the static plot and for understanding how renewable-energy adoption interacts with GDP and emissions among top emitters. It enhances interpretability by offering a multidimensional perspective on emissions drivers.
+
+
+#### 3.9 Global CO₂ Choropleth Map
+
+```{r}
+
+# 1) Pick the latest year in your dataset
+latest_year <- max(combined$year, na.rm = TRUE)
+
+# 2) Aggregate CO2 per country for that year
+co2_latest <- combined[combined$year == latest_year, ]
+
+co2_latest <- dplyr::group_by(co2_latest, iso_code, country)
+
+co2_latest <- dplyr::summarise(
+  co2_latest,
+  co2 = sum(co2, na.rm = TRUE),
+  .groups = "drop"
+)
+
+# 3) World polygons (sf object)
+world <- ne_countries(scale = "medium", returnclass = "sf")
+
+# 4) Join emissions onto the world map
+world_co2 <- dplyr::left_join(
+  world,
+  co2_latest,
+  by = c("iso_a3" = "iso_code")
+)
+
+world_co2 <- world_co2[!is.na(world_co2$co2) & world_co2$co2 > 0, ]
+
+```
+
+```{r}
+choropleth_co2 <- ggplot(world_co2) +
+  geom_sf(aes(fill = co2), color = "grey20", size = 0.1) +
+scale_fill_viridis_c(
+  option = "plasma",
+  trans  = "log10",
+  na.value = "grey90",
+  name = expression(CO[2] * " (log scale)")
+) +
+labs(
+  title = bquote(CO[2] ~ "Emissions by Country in" ~ .(latest_year)),
+  subtitle = "Log-scaled to show both high and low emitters clearly",
+  x = NULL,
+  y = NULL
+) +
+  theme_minimal() +
+  theme(
+    legend.position = "right",
+    panel.grid = element_blank()
+  )
+
+
+choropleth_co2
+```
+The world choropleth map presents CO₂ emissions by country on a logarithmic color scale, allowing both high and low emitters to be visualized simultaneously. The map clearly delineates major emitting regions—particularly East Asia, North America, and parts of the Middle East—while showing much lighter shading across Africa and parts of South Asia, where emissions remain low.
+The log scale highlights the vast inequality in responsibility for global emissions. A small number of countries contribute disproportionately to atmospheric CO₂, revealing the global concentration of industrial activity and fossil-fuel dependence.
+
+#### 3.10 Two-Panel Map: Who Produces CO₂ vs Who Suffers Warming?
+
+```{r}
+
+# Load world map
+world_sf <- rnaturalearth::ne_countries(scale = "medium", returnclass = "sf")
+
+# Latest year
+latest_year <- max(combined$year, na.rm = TRUE)
+
+# Temperature impact column candidates
+temp_candidates <- c(
+  "temperature_change_from_ghg",
+  "temperature_change_from_co2",
+  "temperature_change_from_ch4",
+  "temperature_change_from_n2o"
+)
+temp_col <- temp_candidates[temp_candidates %in% names(combined)][1]
+if (is.na(temp_col)) stop("No temperature-change column found.")
+
+# CO2 column candidates
+co2_candidates <- c(
+  "co2",
+  "co2_including_luc",
+  "consumption_co2",
+  "cement_co2",
+  "coal_co2",
+  "oil_co2",
+  "gas_co2",
+  "flaring_co2"
+)
+co2_col <- co2_candidates[co2_candidates %in% names(combined)][1]
+if (is.na(co2_col)) stop("No CO2 column found.")
+
+# Country column
+country_candidates <- c("country", "country_name")
+country_col <- country_candidates[country_candidates %in% names(combined)][1]
+if (is.na(country_col)) stop("No country column found.")
+
+# Prepare latest-year country data
+latest_df <- combined |>
+  dplyr::filter(year == latest_year) |>
+  dplyr::transmute(
+    country_join = .data[[country_col]],
+    temp_impact  = .data[[temp_col]],
+    co2_total    = .data[[co2_col]]
+  ) |>
+  dplyr::group_by(country_join) |>
+  dplyr::summarise(
+    temp_impact = mean(temp_impact, na.rm = TRUE),
+    co2_total   = mean(co2_total, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+# Join with world map
+world_joined <- dplyr::left_join(world_sf, latest_df, by = c("name" = "country_join"))
+
+# Remove invalid values for log scale
+world_joined$co2_total[!is.finite(world_joined$co2_total) | world_joined$co2_total <= 0] <- NA
+
+# Legend guide
+legend_bar <- guide_colorbar(
+  title.position = "top",
+  title.hjust    = 0.5,
+  barwidth       = unit(7, "cm"),     # <- was 9cm (too wide in HTML)
+  barheight      = unit(0.28, "cm")
+)
+
+# Common theme
+common_theme <- theme_void(base_size = 9) +
+  theme(
+    legend.position      = "bottom",
+    legend.direction     = "horizontal",
+    legend.box           = "vertical",
+    legend.justification = "center",
+
+    legend.box.margin    = ggplot2::margin(t = 2, r = 8, b = 0, l = 8),
+
+    legend.title         = element_text(size = 8),
+    legend.text          = element_text(size = 7),
+
+    plot.title           = element_text(size = 10, face = "bold", hjust = 0),
+    plot.subtitle        = element_text(size = 8, colour = "grey30", hjust = 0),
+
+    # give each panel more breathing room
+    plot.margin          = ggplot2::margin(6, 12, 6, 12)
+  )
+
+# Map 1: temperature impacts
+map_impact <- ggplot(world_joined) +
+  geom_sf(aes(fill = temp_impact), color = NA) +
+  scale_fill_viridis_c(
+    option    = "magma",
+    direction = -1,
+    na.value  = "grey90",
+    name      = "Temp change from GHG (°C)",
+    labels    = scales::label_number(accuracy = 0.01),
+    guide     = legend_bar
+  ) +
+  labs(
+    title = paste0("Countries Experiencing Higher Warming\n", latest_year),
+    subtitle = paste0("Using column: ", temp_col)
+  ) +
+  common_theme
+
+# Map 2: CO2 emissions
+map_co2 <- ggplot(world_joined) +
+  geom_sf(aes(fill = co2_total), color = NA) +
+  scale_fill_viridis_c(
+    option   = "inferno",
+    trans    = "log10",
+    na.value = "grey90",
+    name     = expression("Annual " * CO[2] * " emissions (tonnes)"),
+    labels   = scales::label_number(scale_cut = scales::cut_si("")),
+    guide    = legend_bar
+  ) +
+  labs(
+    title = bquote("Annual " * CO[2] * " Emissions, " * .(latest_year)),
+    subtitle = paste0("Using column: ", co2_col, " (log10 scale)")
+  ) +
+  common_theme
+
+# Combine maps + collect legends
+final_maps <- (map_impact | map_co2) +
+  plot_layout(guides = "collect") +
+  plot_annotation(
+    title    = expression("Who Produces the Most " * CO[2] * "?"),
+    subtitle = "Global emissions versus climate-change impacts (latest year)",
+    theme = theme(
+      plot.title = element_text(
+        size = 14, face = "bold", hjust = 0.5,
+        margin = ggplot2::margin(b = 8)
+      ),
+      plot.subtitle = element_text(
+        size = 10, hjust = 0.5,
+        margin = ggplot2::margin(b = 14)
+      ),
+      # IMPORTANT: extra left/right padding at the whole-figure level
+      plot.margin = ggplot2::margin(10, 18, 10, 18)
+    )
+  ) &
+  theme(legend.position = "bottom")
+
+final_maps
+
+
+```
+The two-panel map juxtaposes greenhouse-gas-driven temperature changes with national CO₂ emissions. This visualization is one of the most compelling pieces of evidence for climate injustice.
+The temperature-impact map shows that regions such as the Arctic, parts of Asia, and Africa experience disproportionately high levels of warming. In contrast, the emissions map shows that the highest CO₂ outputs originate from the United States, China, Russia, and industrialized regions of Europe.
+This side-by-side comparison reveals a major ethical and policy issue:
+Countries contributing least to the problem often bear the greatest environmental and human costs.
+This highlights the urgency of climate finance, adaptation support, and global emission-reduction commitments that account for historical responsibility and vulnerability.
+
+
+#### 3.11 Global CO₂, Temperature Anomaly, and Renewable Energy Index (1990–2023)
+
+```{r}
+# Compute global time series 
+global_ts <- dplyr::group_by(combined, year)
+
+global_ts <- dplyr::summarize(
+  global_ts,
+  temp_anomaly_global = mean(temp_anomaly, na.rm = TRUE),
+  co2_global          = sum(co2, na.rm = TRUE),
+  renewables_global   = mean(renewable_energy_share, na.rm = TRUE)
+)
+
+# Normalize to 1990 = 100
+base_year <- 1990
+base_vals <- global_ts[global_ts$year == base_year, ]
+
+global_ts_norm <- global_ts
+global_ts_norm$temp_index <- 100 * global_ts_norm$temp_anomaly_global / base_vals$temp_anomaly_global
+global_ts_norm$co2_index  <- 100 * global_ts_norm$co2_global / base_vals$co2_global
+global_ts_norm$ren_index  <- 100 * global_ts_norm$renewables_global / base_vals$renewables_global
+
+# Convert to long format (no pipes)
+global_ts_long <- tidyr::pivot_longer(
+  global_ts_norm[, c("year", "temp_index", "co2_index", "ren_index")],
+  cols = -year,
+  names_to = "indicator",
+  values_to = "value"
+)
+
+# Remove NA / Inf values
+global_ts_long_clean <- global_ts_long[
+  is.finite(global_ts_long$value) & !is.na(global_ts_long$value),
+]
+
+# Plot
+ggplot(
+  global_ts_long_clean,
+  aes(x = year, y = value, color = indicator, linetype = indicator)
+) +
+  geom_line(size = 1.1) +
+  labs(
+    title = expression("Global " * CO[2] * ", Temperature Anomalies, and Renewables (1990–2023)"),
+    x = "Year",
+    y = "Index (1990 = 100)",
+    color = "Indicator",
+    linetype = "Indicator"
+  ) +
+  theme_minimal(base_size = 14) +
+  theme(
+    plot.title  = element_text(size = 15, hjust = 0.5, face = "bold"),
+    plot.margin = ggplot2::margin(t = 20, r = 20, b = 20, l = 20)
+  )
+
+```
+This indexed comparison plot normalizes CO₂ emissions, temperature anomalies, and renewable energy share to a common baseline of 1990 = 100. Indexing allows us to compare growth rates across variables that otherwise have different units. The graph shows that global CO₂ emissions have risen steadily since 1990, increasing by more than 50% over the study period. Temperature anomalies, however, rise even more sharply than CO₂, indicating that warming is accelerating relative to emissions. In contrast, the indexed renewable energy share remains almost flat for most of the period, even declining slightly until the early 2010s. Only in the last few years does it show a modest upward movement. The combination of rising emissions, accelerating warming, and stagnant renewable adoption highlights the global imbalance between fossil-fuel use and clean-energy transitions. This visualization sets the stage for understanding why global temperatures continue to rise despite policy discussions around sustainability
+
+#### 3.12 Global Temperature Anomaly Over Time (1990–2023)
+
+```{r}
+plot_obj <- plot_ly(
+  data = combined,
+  x = ~year,
+  y = ~temp_anomaly,
+  type = "scatter",
+  mode = "lines+markers",
+  line = list(color = "firebrick", width = 3),
+  marker = list(size = 6)
+)
+
+plot_obj <- layout(
+  plot_obj,
+  title = "Global Temperature Anomaly (1990–2023)",
+  xaxis = list(title = "Year"),
+  yaxis = list(title = "Temperature Anomaly (°C)")
+)
+
+plot_obj
+
+```
+
+
+This time-series plot isolates global temperature anomalies to show how warming has evolved from 1990 to 2023. The line clearly reveals a persistent upward trajectory, moving from roughly 0.25°C above the baseline in the early 1990s to more than 1.25°C in 2023. Although the curve has short-term fluctuations—caused by natural climatic variations such as El Niño, volcanic activity, or ocean heat exchanges—the long-run trend is unmistakably upward. Especially after 2010, the anomalies begin rising more steeply, reflecting recent years of record-breaking temperatures. The graph provides foundational evidence that climate change is not theoretical or cyclical but a long-term warming trend aligned with rising anthropogenic emissions.
+
+#### 3.13 Global CO₂ Emissions Over Time (1990–2023)
+```{r}
+
+# Compute global CO2 time series
+co2_ts <- combined[is.finite(combined$co2), ]
+
+co2_ts <- dplyr::group_by(co2_ts, year)
+
+co2_ts <- dplyr::summarize(
+  co2_ts,
+  co2_global = sum(co2, na.rm = TRUE)
+)
+
+# Plot
+ggplot(co2_ts, aes(x = year, y = co2_global)) +
+  geom_line(color = "steelblue", linewidth = 1.1) +
+  geom_point(color = "steelblue", alpha = 0.8, size = 2) +
+  labs(
+    title = expression("Global " * CO[2] * " Emissions Over Time (1990–2023)"),
+    x = "Year",
+    y = expression(CO[2] * " emissions (million tonnes)")
+  ) +
+  theme_minimal(base_size = 14)
+
+
+```
+
+
+This graph shows total global CO₂ emissions aggregated annually. The steady and almost uninterrupted growth from roughly 150,000 million tonnes in 1990 to over 240,000 million tonnes in 2023 highlights the sustained dependence on fossil fuels. Periods of plateau or slight decline—such as around 2008 (global financial crisis) and 2020 (COVID-19 disruptions)—are brief and quickly return to the upward trajectory. This confirms that emissions reductions have not yet been structural or durable at the global level. The long-term growth in emissions corresponds closely with GDP expansion, industrialization in emerging economies, and increased global energy demand.
+
+#### 3.14 Global Renewable Energy Share Over Time (1990–2023)
+```{r}
+
+# Compute global renewable energy time series 
+renew_ts <- combined[is.finite(combined$renewable_energy_share), ]
+
+renew_ts <- dplyr::group_by(renew_ts, year)
+
+renew_ts <- dplyr::summarize(
+  renew_ts,
+  renewables_global = mean(renewable_energy_share, na.rm = TRUE)
+)
+
+# Plot
+ggplot(renew_ts, aes(x = year, y = renewables_global)) +
+  geom_line(color = "seagreen4", linewidth = 1.1) +
+  geom_point(color = "seagreen4", alpha = 0.8) +
+  labs(
+    title = "Global Renewable Energy Share Over Time (1990–2023)",
+    x = "Year",
+    y = "Renewable energy share (%)"
+  ) +
+  theme_minimal(base_size = 14)
+
+```
+This graph displays the global share of renewables in primary energy consumption. Surprisingly, instead of increasing over the decades, the renewable share declines from above 34% in the early 1990s to below 30% around 2018. The decline is not because renewables decreased, but because fossil-fuel consumption grew at a much faster rate. Only very recently—around 2021 onward—do we observe a notable jump in renewable adoption, reflecting accelerated investments in solar, wind, and hydro capacity. However, this late surge is still insufficient compared to the scale of CO₂ emissions growth shown earlier. The graph highlights the structural lag between recognizing climate change and implementing large-scale energy transformation.
+
+## 4. Multivariate Structure: PCA & Clustering
+
+
+#### 4.1 Principal Component Analysis (PCA)
+##### 4.1.1 Variance Explained by Principal Components (Scree Plot)
+
+```{r}
+# Build PCA data with a consistent population name (no pipes)
+
+pca_data <- combined
+
+# Rename population.x -> population
+pca_data <- dplyr::rename(
+  pca_data,
+  population = population.x
+)
+
+# Select required columns
+pca_data <- pca_data[
+  , c("country", "year", "co2", "gdp_per_capita", "population", "renewable_energy_share")
+]
+
+# Drop rows with missing values in key variables
+pca_data <- tidyr::drop_na(
+  pca_data,
+  co2,
+  gdp_per_capita,
+  population,
+  renewable_energy_share
+)
+
+# Run PCA on numeric variables (no pipes)
+pca_model <- prcomp(
+  pca_data[, c("co2", "gdp_per_capita", "population", "renewable_energy_share")],
+  scale. = TRUE
+)
+
+summary(pca_model)
+```
+
+```{r}
+
+eig_vals <- pca_model$sdev^2
+prop_var <- eig_vals / sum(eig_vals)
+
+scree_df <- data.frame(
+  PC  = paste0("PC", seq_along(prop_var)),
+  var = prop_var
+)
+
+ggplot(scree_df, aes(x = PC, y = var)) +
+  geom_col(fill = "steelblue") +
+  geom_text(aes(label = scales::percent(var, accuracy = 0.1)),
+            vjust = -0.3, size = 3) +
+  labs(
+    title = "Variance Explained by Principal Components",
+    x = "Principal component",
+    y = "Proportion of variance"
+  ) +
+  ylim(0, max(scree_df$var) * 1.15) +
+  theme_minimal(base_size = 14)
+
+```
+The scree plot illustrates how much variance each principal component (PC) captures from the four standardized variables—CO₂ emissions, GDP per capita, population, and renewable energy share. PC1 explains 45.2% of the total variance, while PC2 captures 27.9%, meaning that together, the first two components already represent over 73% of the multivariate variability in the dataset. The steep drop after PC2 and the very small contribution of PC4 (only 6.6%) indicate that most of the meaningful structure is low-dimensional. This justifies using only PC1 and PC2 for visualizing country clustering, as higher components contribute little new information.
+
+##### 4.1.2 PCA Loadings Plot (PC1 vs PC2)
+
+```{r}
+
+# Rebuild loadings with clean labels
+loadings <- as.data.frame(pca_model$rotation[, 1:2])
+colnames(loadings)[1:2] <- c("PC1", "PC2")
+
+loadings$variable <- c(
+  "CO2 emissions",
+  "GDP",
+  "Population",
+  "Renewable energy share"
+)
+
+ggplot(loadings, aes(x = PC1, y = PC2, label = variable)) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "grey70") +
+  geom_vline(xintercept = 0, linetype = "dashed", color = "grey70") +
+  geom_point(color = "firebrick", size = 3) +
+  geom_text_repel(size = 4, box.padding = 0.3, min.segment.length = 0) +
+  coord_equal(xlim = c(-1, 1), ylim = c(-1, 1)) +
+  labs(
+    title = "PCA Loadings: PC1 vs PC2",
+    x = "PC1 loading",
+    y = "PC2 loading"
+  ) +
+  theme_minimal(base_size = 14)
+
+
+```
+The loadings plot shows how each original variable contributes to PC1 and PC2. CO₂ emissions, GDP per capita, and population all load positively on PC1, indicating that this first component represents a general “economic scale and emissions intensity” axis—countries with higher economic output and large populations also emit more CO₂. Renewable energy share, however, loads strongly on PC2 and in the opposite direction to GDP, suggesting that PC2 represents a “clean-energy versus economic dependency on fossil fuels” axis. Countries with high renewable penetration score high on PC2, while those with fossil-fuel-heavy growth score lower. This separation provides an intuitive interpretation of the PCA structure: PC1 differentiates countries by size/emissions, while PC2 differentiates by energy strategy.
+
+#### 4.2 K-Means Clustering
+
+##### 4.2.1 Elbow Plot for Optimal Cluster Selection
+
+```{r}
+set.seed(123)
+
+# Select PCA inputs
+pca_inputs <- pca_data[, c("co2", "gdp_per_capita", "population", "renewable_energy_share")]
+
+# Scale inputs
+pca_inputs <- scale(pca_inputs)
+
+# Compute within-cluster sum of squares for different k
+wss <- purrr::map_dbl(
+  1:6,
+  function(k) {
+    kmeans(pca_inputs, centers = k, nstart = 20)$tot.withinss
+  }
+)
+
+# Plot elbow curve
+qplot(1:6, wss, geom = "line") +
+  geom_point() +
+  labs(
+    x = "Number of clusters (k)",
+    y = "Total within-cluster sum of squares",
+    title = "Elbow plot for k-means clustering"
+  ) +
+  theme_minimal()
+
+```
+The elbow curve presents the total within-cluster sum of squares across k = 1 to 6 clusters. There is a clear and abrupt decline from k = 1 to k = 3, after which the curve begins to flatten. This “elbow” occurs around k = 3, suggesting that using three clusters best balances model simplicity and internal cohesion. Beyond this point, additional clusters produce diminishing returns and would over-segment the data without meaningful improvement in cluster structure.
+
+##### 4.2.2 Country–Year Clusters in PCA Space (PC1–PC2 Scatter)
+
+```{r}
+
+# PC scores (same rows as pca_data)
+pca_scores <- as.data.frame(pca_model$x[, 1:2])  # PC1 & PC2
+names(pca_scores) <- c("PC1", "PC2")
+
+# Attach country + year
+pca_scores$country <- pca_data$country
+pca_scores$year    <- pca_data$year
+
+
+set.seed(123)
+k <- 3  # or 4, based on your elbow plot
+
+km_model <- kmeans(
+  pca_scores[, c("PC1", "PC2")],
+  centers = k,
+  nstart = 50
+)
+
+# Add cluster labels
+pca_scores$cluster <- factor(km_model$cluster)
+
+# Also keep cluster info attached to the original PCA data
+pca_data_clustered <- pca_data
+pca_data_clustered$cluster <- factor(km_model$cluster)
+
+```
+
+```{r}
+
+ggplot(pca_scores, aes(x = PC1, y = PC2, color = cluster)) +
+  geom_point(alpha = 0.6, size = 1.8) +
+  labs(
+    title  = "Country–year clusters in PCA space",
+    x      = "PC1 score",
+    y      = "PC2 score",
+    color  = "Cluster"
+  ) +
+  theme_minimal(base_size = 14) +
+  scale_color_manual(values = c("firebrick", "steelblue", "darkgreen"))
+
+```
+
+Plotting the k-means results in the reduced PCA space reveals three distinct and interpretable clusters.
+Cluster 1 (Red) groups the majority of countries with low CO₂ emissions, moderate population sizes, and modest GDP levels. These economies tend to emit less and rely more heavily on traditional energy mixes.
+Cluster 2 (Blue) contains countries with high renewable energy shares relative to their GDP and emissions, typically reflecting smaller economies or countries with strong renewable policies.
+Cluster 3 (Green) is sparse but highly distinct, representing large, high-emitting economies with massive populations, such as China and India. These countries dominate global emission totals and form a unique structural block.
+The separation of clusters along PC1 reflects differences in economic scale and emissions, while separation along PC2 highlights renewable energy adoption. The clear spacing confirms that the PCA structure captures meaningful global patterns and that clustering within this reduced space is appropriate.
+
+
+
+```{r}
+
+# Cluster summary
+cluster_summary <- dplyr::group_by(pca_data_clustered, cluster)
+
+cluster_summary <- dplyr::summarize(
+  cluster_summary,
+  n_rows    = dplyr::n(),                 # number of country-year observations
+  avg_co2   = mean(co2, na.rm = TRUE),
+  avg_gdp   = mean(gdp_per_capita, na.rm = TRUE),
+  avg_pop   = mean(population, na.rm = TRUE),
+  avg_renew = mean(renewable_energy_share, na.rm = TRUE)
+)
+
+cluster_summary
+
+```
+
+
+
+## 5. Modeling: Regression, Trees, and Random Forests
+
+
+```{r}
+# Identify population column(s)
+pop_candidates <- intersect(
+  c("population", "population.x", "population.y"),
+  names(combined)
+)
+
+# Choose the one with the fewest missing values
+pop_col <- pop_candidates[
+  which.min(sapply(pop_candidates, function(x) sum(is.na(combined[[x]]))))
+]
+
+cat("Using population column:", pop_col, "\n")
+
+```
+
+
+```{r}
+# Build model data
+model_data <- combined
+
+# Create transformed variables
+model_data$population_clean <- model_data[[pop_col]]
+model_data$log_co2 <- log(model_data$co2 + 1)
+model_data$log_gdp <- log(model_data$gdp + 1)
+model_data$log_pop <- log(model_data$population_clean + 1)
+
+# Select required columns
+model_data <- model_data[
+  , c(
+    "country", "year",
+    "temp_anomaly",
+    "log_co2", "log_gdp", "log_pop",
+    "renewable_energy_share"
+  )
+]
+
+# Drop rows with missing values
+model_data <- tidyr::drop_na(model_data)
+```
+
+
+```{r}
+set.seed(123)
+
+n <- nrow(model_data)
+train_idx <- sample(seq_len(n), size = floor(0.7 * n))
+
+train <- model_data[train_idx, ]
+test  <- model_data[-train_idx, ]
+
+```
+
+
+```{r}
+rf_model <- randomForest(
+  temp_anomaly ~ log_co2 + log_gdp + log_pop + renewable_energy_share,
+  data = train,
+  ntree = 500,
+  mtry = 2,
+  importance = TRUE
+)
+
+rf_model
+
+```
+
+```{r}
+rf_pred <- predict(rf_model, newdata = test)
+
+rf_rmse <- rmse(test$temp_anomaly, rf_pred)
+rf_rmse
+
+```
+
+#### 5.1 Random Forest Variable Importance
+
+```{r}
+varImpPlot(rf_model, main = "Random Forest Variable Importance")
+
+```
+The Random Forest importance plot shows that population size (log_pop) is the most influential driver of temperature anomaly predictions. This makes intuitive sense: larger populations tend to correlate with higher total energy demand, greater industrial activity, and ultimately more emissions. Renewable-energy share emerges as the next meaningful contributor, suggesting that differences in clean-energy adoption significantly affect warming outcomes across countries. GDP and CO₂ emissions also play important roles, but their importance is partially absorbed by population effects due to strong correlations in national growth patterns. Overall, the model highlights that structural socio-economic characteristics—how big a country is and how it sources its energy—shape global temperature patterns more powerfully than individual yearly fluctuations.
+
+#### 5.2 LIME Explanation (Single Prediction)
+
+
+```{r}
+
+set.seed(123)
+
+# Train / test split
+
+n <- nrow(model_data)
+train_idx <- sample(seq_len(n), size = floor(0.7 * n))
+train <- model_data[train_idx, ]
+test  <- model_data[-train_idx, ]
+
+# Predictor matrices (no pipes)
+train_x <- train[, c("log_co2", "log_gdp", "log_pop", "renewable_energy_share")]
+test_x  <- test[,  c("log_co2", "log_gdp", "log_pop", "renewable_energy_share")]
+
+# 1. Fit random forest regression
+
+rf_model <- randomForest(
+  x          = train_x,
+  y          = train$temp_anomaly,
+  ntree      = 500,
+  mtry       = 2,
+  importance = TRUE
+)
+
+# 2. LIME hooks for randomForest (fixes model_type error)
+
+model_type.randomForest <- function(x, ...) {
+  "regression"
+}
+
+predict_model.randomForest <- function(x, newdata, ...) {
+  preds <- predict(x, newdata = newdata)
+  data.frame(Response = preds)
+}
+
+# 3. Build LIME explainer on training data
+
+explainer_lime <- lime(
+  x     = train_x,
+  model = rf_model
+)
+
+# 4. Choose a case from the test set and explain it
+
+example_idx <- 10
+example_x   <- test_x[example_idx, , drop = FALSE]
+
+lime_explanation <- explain(
+  x               = example_x,
+  explainer       = explainer_lime,
+  n_features      = 4,
+  n_permutations  = 5000,
+  feature_select  = "auto"
+)
+
+# 5. Plot LIME feature contributions
+
+plot_features(lime_explanation) +
+  ggtitle(paste("LIME explanation for RF prediction (row", example_idx, ")"))
+```
+
+The LIME explanation breaks down the contribution of each feature for one test-case prediction. The model reduced the predicted temperature anomaly most strongly because of relatively low GDP, indicating that lower economic activity is associated with fewer emissions and thus a cooler predicted anomaly. In contrast, moderate CO₂ levels and populationpush the prediction upward, reflecting their warming effect. A high renewable-energy share slightly offsets the warming forces by reducing the carbon intensity of the country’s energy use. This localized explanation shows how the model balances structural drivers—economic output, population, and energy mix—to arrive at a specific estimated anomaly for a given country-year.
+
+#### 5.3 SHAP Explanation (Single Observation) and 
+
+```{r}
+# SHAP (Shapley) explanation for Random Forest regression
+
+set.seed(123)
+
+# Train / test split
+
+n <- nrow(model_data)
+train_idx <- sample(seq_len(n), size = floor(0.7 * n))
+train <- model_data[train_idx, ]
+test  <- model_data[-train_idx, ]
+
+# Predictor matrices (no pipes)
+train_x <- train[, c("log_co2", "log_gdp", "log_pop", "renewable_energy_share")]
+test_x  <- test[,  c("log_co2", "log_gdp", "log_pop", "renewable_energy_share")]
+
+# 1. Fit random forest regression
+
+rf_model <- randomForest(
+  x          = train_x,
+  y          = train$temp_anomaly,
+  ntree      = 500,
+  mtry       = 2,
+  importance = TRUE
+)
+
+# 2. Wrap model for iml
+
+predictor_rf <- iml::Predictor$new(
+  model = rf_model,
+  data  = train_x,
+  y     = train$temp_anomaly
+)
+
+# 3. Compute SHAP values for a single example
+
+example_idx <- 10
+x_interest  <- test_x[example_idx, , drop = FALSE]
+
+shap_single <- iml::Shapley$new(
+  predictor_rf,
+  x.interest = x_interest
+)
+
+# Plot SHAP contributions for that example
+plot(shap_single) +
+  ggtitle(paste("SHAP explanation for RF prediction (row", example_idx, ")"))
+
+
+```
+The SHAP plot for the same observation provides a more mathematically consistent decomposition of feature contributions. Again, low GDP has the strongest negative effect, lowering the anomaly prediction. CO₂ emissions and population both contribute positively, meaning they raise the predicted anomaly—consistent with well-established climate science. Renewable-energy share has a modest cooling effect but is less influential than population and emissions. SHAP confirms that the model’s internal reasoning aligns with the expected relationships between economic scale, emissions, and warming, offering confidence in the model’s interpretability.
+
+#### 5.4 SHAP Values for 20 Observations
+
+```{r}
+# 4. SHAP for a small sample of test points
+
+sample_idx  <- sample(seq_len(nrow(test_x)), size = 20)
+x_interest2 <- test_x[sample_idx, , drop = FALSE]
+
+shap_sample <- iml::Shapley$new(
+  predictor_rf,
+  x.interest = x_interest2
+)
+
+# Plot SHAP values across the 20 points
+plot(shap_sample) +
+  ggtitle("SHAP values for 20 test observations")
+
+```
+
+When examining SHAP values for 20 different test cases, feature contributions vary across observations, reflecting global diversity. Countries with higher CO₂ emissions and larger populations consistently show positive SHAP values, indicating upward pressure on temperature anomalies. Meanwhile, countries with higher renewable-energy adoption tend to have negative contributions, reflecting a cooling influence. GDP effects vary by development stage—higher GDP may increase emissions in industrializing economies but align with cleaner energy transitions in others. These patterns demonstrate that the model captures nuanced, country-specific pathways linking socio-economic factors to temperature outcomes.
+
+
+#### 5.5 SHAP Summary Plot (Global Feature Impact)
+```{r}
+
+set.seed(123)
+
+# 1. Wrap model for SHAP
+
+predictor_rf <- Predictor$new(
+  model = rf_model,
+  data  = train_x,                  # predictors only
+  y     = train$temp_anomaly
+)
+
+# 2. Compute Shapley values on a subset of rows
+
+n_sample   <- min(100, nrow(train_x))     # for speed
+sample_idx <- sample(seq_len(nrow(train_x)), size = n_sample)
+
+x_interest <- train_x[sample_idx, , drop = FALSE]
+
+shap_values <- lapply(seq_len(nrow(x_interest)), function(i) {
+  shap_obj <- Shapley$new(
+    predictor_rf,
+    x.interest = x_interest[i, , drop = FALSE]
+  )
+  df <- shap_obj$results
+  df$id <- i
+  df
+})
+
+shap_df <- dplyr::bind_rows(shap_values)
+
+# 3. Attach ORIGINAL feature values (no pipes)
+
+feature_long <- x_interest
+feature_long$id <- seq_len(nrow(feature_long))
+
+feature_long <- tidyr::pivot_longer(
+  feature_long,
+  cols = -id,
+  names_to  = "feature",
+  values_to = "feature_value"
+)
+
+shap_long <- dplyr::left_join(
+  shap_df,
+  feature_long,
+  by = c("id", "feature")
+)
+
+# 4. SHAP SUMMARY PLOT (beeswarm)
+
+ggplot(shap_long, aes(x = phi, y = feature, color = feature_value)) +
+  geom_point(alpha = 0.7) +
+  scale_color_viridis_c(option = "plasma") +
+  labs(
+    title    = "SHAP Summary Plot (Random Forest)",
+    subtitle = "Feature impact on temperature anomaly predictions",
+    x        = "SHAP value (feature contribution)",
+    y        = "Feature",
+    color    = "Feature value"
+  ) +
+  theme_minimal(base_size = 14)
+```
+
+The global SHAP summary synthesizes the overall direction and intensity of feature effects across all observations. Renewable-energy share shows a clear negative trend—higher adoption generally lowers predicted warming. CO₂ emissions and population consistently produce positive contributions, confirming their dominant warming role. GDP exhibits more spread, reflecting different national contexts where growth may correspond either with pollution or with cleaner technology adoption. The summary plot reinforces that temperature anomalies arise from a combination of structural demographic factors, industrial intensity, and the pace of renewable-energy transition.
+
+## 6. Evaluation Metrics and Plots
+
+
+```{r}
+
+# RANDOM FOREST MODEL EVALUATION (Metrics + Plots)
+
+# 1. Predictions
+
+train$rf_pred <- predict(rf_model, newdata = train)
+test$rf_pred  <- predict(rf_model, newdata = test)
+
+# Helper function for R2
+r2 <- function(y, y_hat) {
+  1 - sum((y - y_hat)^2) / sum((y - mean(y))^2)
+}
+
+# 2. Evaluation Metrics (Train + Test)
+
+rf_metrics <- tibble::tibble(
+  Dataset = c("Train", "Test"),
+  RMSE = c(
+    rmse(train$temp_anomaly, train$rf_pred),
+    rmse(test$temp_anomaly,  test$rf_pred)
+  ),
+  MAE = c(
+    mae(train$temp_anomaly, train$rf_pred),
+    mae(test$temp_anomaly,  test$rf_pred)
+  ),
+  R2 = c(
+    r2(train$temp_anomaly, train$rf_pred),
+    r2(test$temp_anomaly,  test$rf_pred)
+  )
+)
+
+print(rf_metrics)
+
+```
+#### 6.1 Observed vs Predicted (Test Set)
+
+```{r}
+# 3. Observed vs Predicted (Test set)
+
+p1 <- ggplot(test, aes(x = temp_anomaly, y = rf_pred)) +
+  geom_point(alpha = 0.6, color = "#0072B2") +
+  geom_abline(slope = 1, intercept = 0, linetype = "dashed", linewidth = 1) +
+  labs(
+    title = "Random Forest: Observed vs Predicted (Test Set)",
+    subtitle = paste0(
+      "Test RMSE = ",
+      round(rf_metrics$RMSE[rf_metrics$Dataset == "Test"], 3)
+    ),
+    x = "Observed Temperature Anomaly (°C)",
+    y = "Predicted Temperature Anomaly (°C)"
+  ) +
+  theme_minimal(base_size = 14)
+
+print(p1)
+```
+The observed-versus-predicted plot shows a strong linear alignment with the 45° reference line, demonstrating that the Random Forest model reliably captures temperature-anomaly patterns across countries and years. The test RMSE of about 0.127°C indicates high predictive accuracy given the complexity and variability of climate-related socio-economic data. Small deviations at higher anomaly levels suggest slight underprediction in extreme cases, but overall, the model generalizes well. This validates the model’s usefulness for understanding global drivers of warming.
+
+#### 6.2 Residuals vs Fitted Plot
+
+```{r}
+# 4. Residuals vs Fitted (Test set)
+
+test$rf_resid <- test$temp_anomaly - test$rf_pred
+
+p2 <- ggplot(test, aes(x = rf_pred, y = rf_resid)) +
+  geom_point(alpha = 0.6, color = "#D55E00") +
+  geom_hline(yintercept = 0, linetype = "dashed") +
+  labs(
+    title = "Residuals vs Fitted (Random Forest, Test Set)",
+    x = "Predicted Temperature Anomaly (°C)",
+    y = "Residual (Observed - Predicted)"
+  ) +
+  theme_minimal(base_size = 14)
+
+print(p2)
+```
+
+The residual plot shows no major curvature or funnel-like pattern, indicating that the model successfully captures nonlinear relationships without missing systematic trends. The faint diagonal bands arise from country-level clustering, which is expected because nations with similar socio-economic profiles produce similar fitted values. Slight negative slopes at high temperatures suggest minor underestimation of extreme anomalies. Still, residuals remain evenly distributed around zero, implying good model fit and stability across the prediction range
+
+#### 6.3Distribution of Residuals
+
+```{r}
+# 5. Residual Distribution (Test set)
+
+p3 <- ggplot(test, aes(x = rf_resid)) +
+  geom_histogram(bins = 30, fill = "#009E73", alpha = 0.7) +
+  labs(
+    title = "Distribution of Random Forest Residuals (Test Set)",
+    x = "Residual (Observed - Predicted)",
+    y = "Count"
+  ) +
+  theme_minimal(base_size = 14)
+
+print(p3)
+```
+Residuals form a near-normal distribution centered around zero, suggesting that the Random Forest does not systematically overpredict or underpredict temperature anomalies. Most residuals fall within ±0.15°C, which is reasonable for global climate-economic data. This distribution indicates well-behaved errors and supports the model’s reliability. Together with the other evaluation checks, this reinforces that the Random Forest is an effective tool for capturing the complex interplay between emissions, demographics, energy transition, and temperature outcomes.
+
+## 7. Research Question Analysis
+
+1. Are global temperature anomalies statistically linked to rising CO₂ emissions?
+
+Yes. Across multiple analytical layers—time-series trends, correlation patterns, PCA structure, and Random Forest modeling—the relationship between CO₂ emissions and temperature anomalies is consistently strong and positive.
+The CO₂ emissions time series shows a steady rise from 1990 to 2023, while global temperature anomalies exhibit a parallel upward trajectory. PCA results place CO₂ loadings strongly on the same direction as temperature-related structural factors (population, GDP), indicating CO₂ growth aligns with broader drivers of warming. The Random Forest model further confirms the statistical link: higher CO₂ levels consistently produce positive SHAP and LIME contributions to predicted temperature anomalies. Together, the evidence demonstrates that rising CO₂ emissions are tightly associated with global temperature increases.
+
+2. Does renewable-energy adoption mitigate this relationship?
+
+Yes, but the effect is partial and heterogeneous across countries.
+Time-series indices show renewable-energy share remained flat or declined for many years before rising in the late 2010s, suggesting slow global adoption. PCA loadings place renewable energy on an axis opposite to CO₂ emissions, signaling a structural contrast between carbon-intensive and cleaner economies. SHAP and LIME analyses consistently show that higher renewable-energy shares reduce predicted temperature anomalies, confirming a measurable cooling influence. However, this effect is smaller compared to the influence of population and emissions. Thus, renewable energy does mitigate warming pressures, but insufficient global deployment limits its overall impact on the CO₂–temperature link.
+
+3. Which regions have shown a decoupling of economic growth from emissions?
+
+Clustering and PCA results highlight three broad groups of countries:
+Cluster 3 (high-GDP, high-population emitters) – large contributors to CO₂ with strong coupling between economic growth and emissions.
+Cluster 1 (mid-income, moderate emissions) – economies still transitioning and showing partial decoupling.
+Cluster 2 (high-renewable, low-emissions countries) – these countries demonstrate the clearest decoupling, achieving economic growth with minimal emissions increases due to strong clean-energy penetration.
+The PCA and clustering therefore reveal that advanced economies with high renewable-energy shares—for example, Northern European nations—have achieved the most successful decoupling, while rapidly industrializing regions continue to scale both GDP and emissions together.
+
+## 8. Limitations of the Analysis
+
+A key limitation is data availability and consistency. Not all countries report complete annual records for CO₂, temperature anomalies, renewable-energy share, or GDP, leading to missing values and potential sampling bias. Additionally, temperature anomalies represent global or national averages, which may overlook local climate dynamics and variability. Machine learning models like Random Forests capture nonlinearities but cannot infer causal mechanisms, meaning observed relationships reflect correlations rather than definitive causal pathways. Lastly, renewable-energy data do not differentiate between types of renewables or policy contexts, which limits deeper interpretation.
+
+## 9. Future Work
+
+Future studies could incorporate sector-level emissions, energy-source granularity, and policy intervention data to better understand the mechanisms behind decoupling and energy transitions. Incorporating spatial climate models, carbon-intensity metrics, and time-lag effects could strengthen causal insights. Experimenting with deep learning, gradient boosting, or dynamic panel models may improve forecast accuracy. Expanding the dataset to include land-use change, methane emissions, and climate policy indices would offer a more holistic picture of global warming drivers and mitigation pathways.

@@ -1,0 +1,203 @@
+## 2. Data & Preprocessing
+
+#### 2.1 Loading and Preparing Analytical Libraries
+The analysis begins by loading essential data-science libraries such as tidyverse for data wrangling and visualization, janitor for standardized cleaning of variable names, and here for reproducible file-path management. These tools provide a cohesive framework for handling multiple datasets of varying formats and sizes. Establishing a consistent computational environment is especially important in climate research, where datasets are large, multi-dimensional, and sourced from different institutions with differing naming conventions.
+
+
+```{r}
+library(tidyverse)
+library(janitor)
+library(here)
+library(ggplot2)
+library(dplyr)
+library(GGally)
+library(sf)
+library(rnaturalearth)
+library(rnaturalearthdata)
+library(cartogram)
+library(plotly)
+library(tidyr)
+library(scales)
+library(patchwork)
+library(randomForest)
+library(lime)
+library(Metrics)
+library(iml)       # SHAP
+library(mlr3)
+library(mlr3learners)
+library(ggrepel)
+library(grid)   # for unit()
+
+```
+
+
+
+```{r}
+#load the datasets
+gistem <- read_csv("~/Downloads/data.csv", skip = 1)
+gistem <- clean_names(gistem)
+
+owid <- read_csv("~/Downloads/owid-co2-data.csv")
+owid <- clean_names(owid)
+
+wdi_pop <- read_csv("~/Downloads/pop.csv", skip = 4)
+wdi_pop <- clean_names(wdi_pop)
+
+wdi_gdp <- read_csv("~/Downloads/gdp.csv", skip = 4)
+wdi_gdp <- clean_names(wdi_gdp)
+
+wdi_ren <- read_csv("~/Downloads/rne.csv", skip = 4)
+wdi_ren <- clean_names(wdi_ren)
+
+```
+#### 2.2 Importing and Cleaning NASA GISTEMP Temperature Data
+
+The NASA GISTEMP dataset serves as the foundation for the temperature portion of the analysis. It contains monthly temperature anomalies relative to a historical baseline. Before the data can be used, several cleaning steps are necessary. Non-numeric placeholders—such as "***", which represent missing temperature estimates—must be replaced with proper missing values to prevent computational errors. The monthly values are then averaged to produce a reliable annual temperature anomaly for each year, reducing noise and making the data comparable to annual CO₂ and socio-economic indicators. The dataset is further restricted to the period 1990–2023, aligning the temporal coverage with the economic and emissions datasets used in the project.
+
+```{r}
+month_cols <- c("jan","feb","mar","apr","may","jun",
+                "jul","aug","sep","oct","nov","dec")
+### 1. Replace "***" only in character columns
+gistem <- mutate_if(gistem, is.character, ~na_if(.,"***"))
+
+### 2. Convert month columns to numeric
+month_cols <- c("jan","feb","mar","apr","may","jun",
+                "jul","aug","sep","oct","nov","dec")
+
+gistem[, month_cols] <- lapply(gistem[, month_cols], as.numeric)
+
+### 3. Compute annual mean anomaly
+gistem$temp_anomaly <- rowMeans(gistem[, month_cols], na.rm = TRUE)
+
+### 4. Keep year + temp anomaly
+gistem_annual <- gistem[, c("year","temp_anomaly")]
+
+### 5. Convert year to numeric
+gistem_annual$year <- as.numeric(gistem_annual$year)
+
+### 6. Limit to study years 1990–2023
+gistem_annual <- gistem_annual[gistem_annual$year >= 1990, ]
+
+```
+
+#### 2.3 Cleaning and Filtering the OWID CO₂ Emissions Dataset
+
+The OWID dataset contributes detailed environmental indicators, including CO₂ emissions, methane emissions, and several energy-related variables for each country-year. Because this dataset spans multiple decades, it is filtered to include only observations from 1990 onward, ensuring compatibility with the NASA and WDI datasets. This preprocessing step guarantees that all subsequent analyses—such as correlations, scatterplots, PCA, and modeling—operate on aligned time periods. By cleaning and structuring the OWID dataset, we obtain the primary emissions metrics required to understand global warming trends.
+
+```{r}
+# Filter to usable years only
+owid <- owid[owid$year >= 1990, ]
+```
+
+#### 2.4 Reshaping WDI Population Data into Analytical Format
+
+The World Bank’s population dataset originally appears in a wide format, with each year listed as a separate column. This layout is not suitable for merged longitudinal analysis. Therefore, the dataset is reshaped into a long format, where each row corresponds to a single country-year observation. Converting the wide year columns into a unified year variable ensures that population figures can be reliably merged with emissions and temperature data. This transformation allows population to be used as a key explanatory variable when analyzing how demographic growth affects emissions intensity and national emissions trajectories.
+
+#### 2.5 Preparing WDI GDP per Capita Data
+
+Like the population dataset, the GDP per capita dataset must also be converted from wide to long format. After reshaping, each country-year observation contains its corresponding GDP value, enabling meaningful comparisons across space and time. This preprocessing is crucial because GDP per capita is a strong proxy for industrialization, economic development, and consumption patterns—factors that directly influence emissions. Ensuring consistency across years allows GDP to be incorporated into multivariate analyses and used to interpret variations among country clusters.
+
+#### 2.6 Processing WDI Renewable-Energy Share Data
+
+The renewable-energy dataset presents another set of wide-format values that requires restructuring. After reshaping into long format and aligning the year values, the dataset captures each country’s annual renewable-energy share. This variable is essential for evaluating whether countries with higher renewable-energy adoption exhibit lower emissions growth or reduced emissions intensity. Accurate preprocessing ensures that renewable-energy data can be meaningfully compared with GDP, emissions, and warming patterns across the study period.
+
+
+```{r}
+year_cols_pop <- grep("^x?\\d{4}$", names(wdi_pop), value = TRUE)
+year_cols_gdp <- grep("^x?\\d{4}$", names(wdi_gdp), value = TRUE)
+year_cols_ren <- grep("^x?\\d{4}$", names(wdi_ren), value = TRUE)
+```
+
+```{r}
+wdi_pop_long <- pivot_longer(
+  wdi_pop,
+  cols = all_of(year_cols_pop),
+  names_to = "year",
+  values_to = "population"
+)
+wdi_pop_long$year <- as.integer(str_extract(wdi_pop_long$year, "\\d{4}"))
+```
+
+
+```{r}
+wdi_gdp_long <- pivot_longer(
+  wdi_gdp,
+  cols = all_of(year_cols_gdp),
+  names_to = "year",
+  values_to = "gdp_per_capita"
+)
+wdi_gdp_long$year <- as.integer(str_extract(wdi_gdp_long$year, "\\d{4}"))
+```
+
+
+```{r}
+wdi_ren_long <- pivot_longer(
+  wdi_ren,
+  cols = all_of(year_cols_ren),
+  names_to = "year",
+  values_to = "renewable_energy_share"
+)
+wdi_ren_long$year <- as.integer(str_extract(wdi_ren_long$year, "\\d{4}"))
+```
+
+#### 2.7 Merging Population, GDP, and Renewable-Energy Indicators into a Unified WDI Dataset
+
+Once each WDI dataset is cleaned and reshaped, they are merged into a single socio-economic dataset using country codes and years as identifiers. This merged table links population, economic development, and energy structure into one consistent dataset. Maintaining all available observations—even when some indicators are missing—maximizes the dataset’s coverage and analytical value. This unified WDI dataset forms the socio-economic backbone of the project, providing context for interpreting why countries vary in emissions and climate vulnerability.
+
+
+```{r}
+# Start with population + GDP
+wdi <- merge(
+  wdi_pop_long[ , c("country_name", "country_code", "year", "population")],
+  wdi_gdp_long[ , c("country_code", "year", "gdp_per_capita")],
+  by = c("country_code", "year"),
+  all.x = TRUE
+)
+
+# Add renewable energy share
+wdi <- merge(
+  wdi,
+  wdi_ren_long[ , c("country_code", "year", "renewable_energy_share")],
+  by = c("country_code", "year"),
+  all.x = TRUE
+)
+
+# Restrict to analysis years
+wdi <- wdi[wdi$year >= 1990 & wdi$year <= 2023, ]
+```
+
+
+#### 2.8 Integrating WDI, OWID, and NASA Datasets into a Single Analytical Frame
+
+The final step of preprocessing is to merge all prepared datasets into one comprehensive analytical table. First, the WDI socio-economic dataset is merged with the OWID emissions dataset, aligning each country-year entry with its corresponding emissions and energy statistics. Next, NASA’s annual temperature anomalies are linked by year, allowing global warming trends to be examined in conjunction with national emissions patterns. The result is a harmonized dataset that includes temperature anomalies, emissions, population, GDP, and renewable-energy share for the period 1990–2023.
+This integrated dataset enables the project to examine how economic activity, demographic pressure, and energy choices interact with emissions and global warming. Without these preprocessing steps, the multivariate and modeling analyses performed later in the project would not be feasible.
+
+
+```{r}
+combined <- merge(
+  owid,
+  wdi,
+  by.x = c("iso_code", "year"),
+  by.y = c("country_code", "year"),
+  all.x = TRUE
+)
+```
+
+
+
+```{r}
+combined <- merge(
+  combined,
+  gistem_annual,
+  by = "year",
+  all.x = TRUE
+)
+```
+
+```{r}
+dir.create("data", showWarnings = FALSE, recursive = TRUE)
+
+saveRDS(gistem_annual, "data/gistem_annual.rds")
+saveRDS(combined,      "data/combined.rds")
+```
+
