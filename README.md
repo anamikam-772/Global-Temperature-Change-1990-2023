@@ -1,7 +1,7 @@
 # Quantifying the Impact of CO₂ Emissions and Renewable Energy Adoption on Global Temperature Change (1990–2023)
 
 **Published:** December 17, 2025  
-**Authors:** (Add your names here)
+**Authors:** Anamika Kumari Mishra , Afreen Sorathiya 
 
 ---
 
